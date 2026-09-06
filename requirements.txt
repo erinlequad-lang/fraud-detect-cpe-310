@@ -1,5 +1,0 @@
-streamlit==1.38.0
-pandas
-plotly
-scikit-learn==1.8.0
-joblib
