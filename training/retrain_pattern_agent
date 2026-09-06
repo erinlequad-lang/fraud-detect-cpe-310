@@ -1,0 +1,73 @@
+"""
+Retrains the Pattern Spotting Agent's model, focused specifically on the
+weakness found during hard-mode testing: poor precision within
+TRANSFER and CASH_OUT transactions, where legitimate activity can also
+fully empty an account or show a small balance mismatch.
+
+Run this in the same Colab notebook where PS_20174392719_1491204439457_log.csv
+already sits from earlier testing.
+"""
+
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+import joblib
+
+df = pd.read_csv("PS_20174392719_1491204439457_log.csv")
+
+# Fraud only ever occurs in these two types in PaySim. Training on the
+# full dataset lets the model get "easy credit" for perfectly separating
+# PAYMENT/CASH_IN/DEBIT (which are never fraud), which hides how well it
+# actually separates fraud from legitimate activity where it matters.
+df = df[df["type"].isin(["TRANSFER", "CASH_OUT"])].copy()
+
+df["orig_emptied"] = ((df["newbalanceOrig"] == 0) & (df["oldbalanceOrg"] > 0)).astype(int)
+df["dest_balance_unchanged"] = (
+    (df["oldbalanceDest"] == 0) & (df["newbalanceDest"] == 0) & (df["amount"] > 0)
+).astype(int)
+df["balance_error_orig"] = df["oldbalanceOrg"] - df["amount"] - df["newbalanceOrig"]
+
+# New feature: how big the balance error is relative to the transaction
+# itself. A tiny error relative to a large amount looks like a rounding
+# or fee artefact, real fraud tends to produce an error that is large
+# relative to the amount moved.
+df["balance_error_ratio"] = df["balance_error_orig"] / df["amount"].replace(0, 1)
+
+for t in ["CASH_IN", "CASH_OUT", "DEBIT", "PAYMENT", "TRANSFER"]:
+    df[f"type_{t}"] = (df["type"] == t).astype(int)
+
+feature_cols = [
+    "amount", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest",
+    "orig_emptied", "dest_balance_unchanged", "balance_error_orig", "balance_error_ratio",
+    "type_CASH_IN", "type_CASH_OUT", "type_DEBIT", "type_PAYMENT", "type_TRANSFER",
+]
+
+X = df[feature_cols]
+y = df["isFraud"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=1, stratify=y
+)
+
+# class_weight="balanced" tells the model fraud cases matter more than
+# their tiny share of the data would otherwise suggest, since fraud is
+# still a small fraction even within just TRANSFER/CASH_OUT.
+model = RandomForestClassifier(
+    n_estimators=300, max_depth=12, class_weight="balanced", random_state=1, n_jobs=-1
+)
+model.fit(X_train, y_train)
+
+preds = model.predict(X_test)
+print(classification_report(y_test, preds, target_names=["legitimate", "fraud"]))
+print("Confusion matrix (rows = actual, cols = predicted):")
+print(confusion_matrix(y_test, preds))
+
+importances = sorted(zip(feature_cols, model.feature_importances_), key=lambda x: -x[1])
+print("\nFeature importances:")
+for name, imp in importances:
+    print(f"{name:25s} {imp:.4f}")
+
+joblib.dump(model, "pattern_model.pkl")
+joblib.dump(feature_cols, "feature_cols.pkl")
+print("\nSaved pattern_model.pkl and feature_cols.pkl, download these and replace the old ones.")
